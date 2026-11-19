@@ -91,8 +91,8 @@ your headphones. If you clicked *Don't Allow*, turn it on later in
 
 <img src="docs/screenshot-menubar.png" width="115" alt="Menu bar icon showing 70%">
 
-Switch your headphones on. Within a few seconds the icon appears with the battery
-percentage next to it. Click it for the details:
+Switch your headphones on and let them connect to your Mac. A few seconds later the icon
+shows the battery percentage next to it. Click it for the details:
 
 | Menu item | What it does |
 | --- | --- |
@@ -103,12 +103,9 @@ percentage next to it. Click it for the details:
 | **Forget Headphones & Search Again** | Drop the remembered headphones, e.g. after re-pairing or switching to another Sonos Ace |
 | **Open Bluetooth Settings…** | Jump to the macOS Bluetooth settings |
 
-A **dimmed icon with a question mark** means the headphones are off, out of range, or
-Bluetooth is disabled. The app keeps waiting and reconnects automatically when they
-come back.
-
-The battery connection is independent of audio: even while the headphones are playing
-from your phone, the app shows their battery as long as they're in range of the Mac.
+A **dimmed icon with a question mark** means the headphones are off, out of range,
+connected to another device instead of this Mac, or Bluetooth is disabled. The app keeps
+waiting and reconnects automatically when they come back.
 
 ## How it works
 
@@ -121,11 +118,18 @@ This app opens its own LE connection to the headphones with CoreBluetooth, reads
 Battery Level characteristic (0x2A19), subscribes to notifications, and polls every two
 minutes as a fallback. No private APIs, no kernel extensions, no Sonos account.
 
+The app only opens that LE connection once the headphones' regular audio connection to
+the Mac is up, and closes it when the audio connection drops. If the LE connection comes
+first, macOS still plays audio through the headphones but leaves them out of the Sound
+menu and Sound settings.
+
 Tested with the Sonos Ace Ultra; the original Sonos Ace exposes the same service.
 
 ## Troubleshooting
 
 **The icon stays dimmed / never connects**
+- Make sure the headphones are connected to this Mac as an audio device. The app waits
+  for that before it reads the battery.
 - Check that Bluetooth access is allowed in **System Settings › Privacy & Security › Bluetooth**.
 - Make sure the headphones aren't holding too many LE connections (for example several
   phones with the Sonos app open). Closing the Sonos app on other devices helps.
@@ -178,6 +182,7 @@ Sources/SonosAceBattery/
   main.swift                          NSApplication bootstrap (accessory app, no Dock icon)
   AppDelegate.swift                   wires monitor and status item together
   BatteryMonitor.swift                CoreBluetooth: find, connect, read, notify, reconnect
+  AudioLinkWatcher.swift              IOBluetooth: is the audio link to this Mac up?
   StatusItemController.swift          NSStatusItem, menu, launch-at-login
   BatteryIcon.swift                   template battery glyph with proportional fill
   Log.swift                           unified log, stderr and log file

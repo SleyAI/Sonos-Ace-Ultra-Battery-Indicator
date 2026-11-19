@@ -5,6 +5,8 @@ import Foundation
 enum BatteryState: Equatable {
     case bluetoothOff
     case unauthorized
+    /// The headphones' audio link to this Mac is down, so we stay off LE (see AudioLinkWatcher).
+    case audioNotConnected(name: String?)
     case searching
     case connecting(name: String)
     case connected(name: String, level: Int?, updated: Date?)
@@ -12,6 +14,7 @@ enum BatteryState: Equatable {
     var deviceName: String? {
         switch self {
         case .connecting(let n), .connected(let n, _, _): return n
+        case .audioNotConnected(let n): return n
         default: return nil
         }
     }
@@ -24,6 +27,9 @@ protocol BatteryMonitorDelegate: AnyObject {
 /// Reads the standard GATT Battery Service (0x180F) that the Sonos Ace headphones
 /// expose over Bluetooth Low Energy. macOS does not surface this value for classic
 /// audio devices, so we read it ourselves. No private APIs involved.
+///
+/// The LE connection is only held while the headphones' classic audio link to this Mac is
+/// up. Connecting over LE first makes macOS hide them from the Sound menu.
 final class BatteryMonitor: NSObject {
     private static let batteryService = CBUUID(string: "180F")
     private static let batteryLevelCharacteristic = CBUUID(string: "2A19")
@@ -32,6 +38,8 @@ final class BatteryMonitor: NSObject {
     private static let savedIdentifierKey = "peripheralIdentifier"
     private static let savedNameKey = "peripheralName"
     private static let pollInterval: TimeInterval = 120
+    /// Give macOS time to finish setting up the audio device before we add our LE link.
+    private static let audioSettleDelay: TimeInterval = 5
 
     weak var delegate: BatteryMonitorDelegate?
 
@@ -47,18 +55,42 @@ final class BatteryMonitor: NSObject {
     private var peripheral: CBPeripheral?
     private var levelCharacteristic: CBCharacteristic?
     private var pollTimer: Timer?
+    private let audioLink = AudioLinkWatcher()
+    private var audioLinkUp = false
+    private var settleWork: DispatchWorkItem?
 
     var lastKnownName: String? {
         UserDefaults.standard.string(forKey: Self.savedNameKey)
     }
 
     func start() {
+        audioLink.onChange = { [weak self] name in self?.audioLinkChanged(name) }
         Log.info("starting, Bluetooth authorization = \(CBManager.authorization.rawValue) (0 not determined, 1 restricted, 2 denied, 3 allowed)")
         central = CBCentralManager(
             delegate: self,
             queue: .main,
             options: [CBCentralManagerOptionShowPowerAlertKey: false]
         )
+        audioLink.start()
+    }
+
+    private func audioLinkChanged(_ name: String?) {
+        settleWork?.cancel()
+        settleWork = nil
+        if let name {
+            Log.info("audio link up (\(name)), connecting over LE in \(Int(Self.audioSettleDelay)) s")
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.audioLink.connectedName != nil else { return }
+                self.audioLinkUp = true
+                self.beginSearch()
+            }
+            settleWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.audioSettleDelay, execute: work)
+        } else {
+            Log.info("audio link down, releasing LE connection")
+            audioLinkUp = false
+            beginSearch()
+        }
     }
 
     /// Re-read the battery level right now.
@@ -84,6 +116,12 @@ final class BatteryMonitor: NSObject {
         guard central.state == .poweredOn else { return }
         central.stopScan()
 
+        guard audioLinkUp else {
+            dropPeripheral()
+            state = .audioNotConnected(name: lastKnownName)
+            return
+        }
+
         // 1. The system may already hold an LE link to the headphones.
         if let p = central.retrieveConnectedPeripherals(withServices: [Self.batteryService])
             .first(where: { Self.looksLikeSonosAce($0.name) }) {
@@ -106,7 +144,7 @@ final class BatteryMonitor: NSObject {
         if peripheral == nil { state = .searching }
     }
 
-    private static func looksLikeSonosAce(_ name: String?) -> Bool {
+    static func looksLikeSonosAce(_ name: String?) -> Bool {
         guard let name = name?.lowercased() else { return false }
         return name.contains("sonos") && name.contains("ace")
     }
@@ -204,10 +242,10 @@ extension BatteryMonitor: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didFailToConnect p: CBPeripheral, error: Error?) {
         Log.info("failed to connect: \(error?.localizedDescription ?? "unknown error")")
-        guard p.identifier == peripheral?.identifier else { return }
+        guard p.identifier == peripheral?.identifier, audioLinkUp else { return }
         state = .connecting(name: p.name ?? lastKnownName ?? "Sonos Ace")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, self.peripheral?.identifier == p.identifier else { return }
+            guard let self, self.audioLinkUp, self.peripheral?.identifier == p.identifier else { return }
             self.central.connect(p, options: nil)
         }
     }
@@ -217,8 +255,13 @@ extension BatteryMonitor: CBCentralManagerDelegate {
         guard p.identifier == peripheral?.identifier else { return }
         stopPolling()
         levelCharacteristic = nil
+        guard audioLinkUp else {
+            peripheral = nil
+            state = .audioNotConnected(name: p.name ?? lastKnownName)
+            return
+        }
+        // The audio link is still up, so only the LE link dropped: reconnect right away.
         state = .connecting(name: p.name ?? lastKnownName ?? "Sonos Ace")
-        // Re-issue the connect so CoreBluetooth reconnects when the headphones return.
         central.connect(p, options: nil)
     }
 }

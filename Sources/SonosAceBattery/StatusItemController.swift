@@ -110,6 +110,11 @@ final class StatusItemController: NSObject, BatteryMonitorDelegate, NSMenuDelega
             header = "Bluetooth access denied"
             detail = "Allow access in System Settings › Privacy & Security › Bluetooth."
             tooltip = header
+        case .audioNotConnected(let name):
+            dimmed = true
+            header = name ?? "Sonos Ace"
+            detail = "Not connected to this Mac"
+            tooltip = "\(header): not connected to this Mac"
         case .searching:
             dimmed = true
             header = "Looking for Sonos Ace…"
